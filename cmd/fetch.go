@@ -86,8 +86,8 @@ var fetchCmd = &cobra.Command{
 					continue
 				}
 				if has {
-					// Check if we already have a transcript
-					hasTx, _ := store.HasTranscript(ctx, entry.VideoID, cfg.Transcript.Languages[0])
+					// Check if we already have a transcript in any language
+					hasTx, _ := store.HasAnyTranscript(ctx, entry.VideoID)
 					if hasTx {
 						slog.Debug("skipping, transcript exists", "video", entry.VideoID)
 						continue

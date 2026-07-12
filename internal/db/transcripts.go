@@ -72,6 +72,15 @@ func (s *Store) HasTranscript(ctx context.Context, videoID, language string) (bo
 	return exists, err
 }
 
+func (s *Store) HasAnyTranscript(ctx context.Context, videoID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx,
+		"SELECT EXISTS(SELECT 1 FROM transcripts WHERE video_id = ?)",
+		videoID,
+	).Scan(&exists)
+	return exists, err
+}
+
 // GetTranscriptsInWindow returns all transcripts for videos published within the given time window.
 func (s *Store) GetTranscriptsInWindow(ctx context.Context, start, end time.Time, channelID string) ([]Transcript, error) {
 	query := `SELECT t.id, t.video_id, t.language, t.content_json, t.content_text, t.provider, t.created_at
