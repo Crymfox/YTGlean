@@ -26,6 +26,9 @@ var rootCmd = &cobra.Command{
 	Long:  `YTGlean fetches transcripts from tracked YouTube channels, stores them in SQLite, summarizes them via LLM, and optionally exposes the data as an MCP server.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		setupLogging()
+		if err := config.EnsureConfigDir(); err != nil {
+			slog.Warn("could not create config directory", "error", err)
+		}
 		var err error
 		cfg, err = config.Load()
 		if err != nil {

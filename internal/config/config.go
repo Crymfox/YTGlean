@@ -40,11 +40,20 @@ type MCPConfig struct {
 }
 
 func defaultDataDir() string {
-	dataDir, err := os.UserCacheDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		dataDir = os.TempDir()
+		home = os.TempDir()
 	}
-	return filepath.Join(dataDir, "ytglean")
+	return filepath.Join(home, ".local", "share", "ytglean")
+}
+
+func defaultConfigDir() string {
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		home, _ := os.UserHomeDir()
+		configDir = filepath.Join(home, ".config")
+	}
+	return filepath.Join(configDir, "ytglean")
 }
 
 func Load() (*Config, error) {
@@ -79,4 +88,44 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// EnsureConfigDir creates the config directory and a default config file if they don't exist.
+func EnsureConfigDir() error {
+	cfgDir := defaultConfigDir()
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		return err
+	}
+
+	cfgFile := filepath.Join(cfgDir, "config.yaml")
+	if _, err := os.Stat(cfgFile); os.IsNotExist(err) {
+		defaultContent := `# YTGlean Configuration
+# See README.md for options.
+
+database:
+  # path: ~/.local/share/ytglean/ytglean.db
+  retention_days: 30
+
+transcript:
+  provider: auto        # auto | innertube | ytdlp
+  languages: [en]
+  # cookie_file: ""
+  max_concurrent: 3
+
+summarizer:
+  # endpoint: https://api.openai.com/v1
+  # api_key: set via YTGLEAN_API_KEY env var
+  model: gpt-4o-mini
+  max_tokens: 1024
+
+mcp:
+  transport: stdio      # stdio | http
+  port: 8080
+`
+		if err := os.WriteFile(cfgFile, []byte(defaultContent), 0o644); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
