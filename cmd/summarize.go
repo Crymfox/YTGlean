@@ -36,7 +36,7 @@ var summarizeCmd = &cobra.Command{
 		}
 
 		if cfg.Summarizer.APIKey == "" && cfg.Summarizer.Endpoint == "https://api.openai.com/v1" {
-			return fmt.Errorf("no API key set. Set YTGLEAN_API_KEY or configure summarizer.api_key")
+			return fmt.Errorf("no API key set. Configure summarizer.api_key in ~/.config/ytglean/config.yaml")
 		}
 
 		windowEnd := time.Now()

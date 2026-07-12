@@ -6,10 +6,13 @@ Glean transcripts from YouTube channels, store them in SQLite, summarize via LLM
 
 - Track YouTube channels and automatically fetch new video transcripts
 - Dual transcript providers: InnerTube API (fast, pure Go) with yt-dlp fallback
+- Automatic channel ID and name resolution from handles/URLs
+- Language fallback: tries all configured transcript languages before failing
+- Retry with exponential backoff on transient failures
+- Rate limiting protection with configurable fetch delay
 - Summarize transcripts via any OpenAI-compatible API (OpenAI, Ollama, LM Studio, etc.)
 - Full-text search across stored transcripts
 - MCP server for AI agent integration (Claude Desktop, Cursor, etc.)
-- Automatic channel ID and name resolution from handles/URLs
 - Configurable data retention and pruning
 
 ## Prerequisites
@@ -33,9 +36,12 @@ go build -o ytglean .
 
 ## Quick Start
 
+On first run, YTGlean auto-generates a config file at `~/.config/ytglean/config.yaml`.
+Edit it to set your API key and preferred settings.
+
 ```bash
-# 1. Add a channel
-./ytglean channel add @Fireship --name "Fireship"
+# 1. Add a channel (name is auto-extracted from YouTube)
+./ytglean channel add @Fireship
 
 # 2. Fetch transcripts
 ./ytglean fetch
@@ -49,20 +55,13 @@ go build -o ytglean .
 
 ## Configuration
 
-YTGlean uses Viper for configuration. Config is loaded from (in order of priority):
+On first run, YTGlean creates `~/.config/ytglean/config.yaml` with sensible defaults. Edit this file to customize settings.
+
+Config is loaded from (in order of priority):
 
 1. `--config` flag
-2. `YTGLEAN_CONFIG` environment variable
-3. `~/.config/ytglean/config.yaml`
-4. `./config.yaml`
-
-### Environment Variables
-
-| Variable | Description | Default |
-|---|---|---|
-| `YTGLEAN_API_KEY` | API key for OpenAI-compatible LLM | — |
-| `YTGLEAN_ENDPOINT` | LLM API endpoint | `https://api.openai.com/v1` |
-| `YTGLEAN_CONFIG` | Path to config file | — |
+2. `~/.config/ytglean/config.yaml`
+3. `./config.yaml`
 
 ### Config File Example
 
@@ -73,23 +72,19 @@ database:
 
 transcript:
   provider: auto          # auto | innertube | ytdlp
-  languages: [en]
+  languages: [en]         # tried in order, first available wins
   max_concurrent: 3
+  fetch_delay: 2s         # delay between requests to avoid rate limiting
 
 summarizer:
   endpoint: https://api.openai.com/v1
+  api_key: your-api-key-here
   model: gpt-4o-mini
-  max_tokens: 1024
+  max_tokens: 2048
 
 mcp:
   transport: stdio        # stdio | http
   port: 8080
-```
-
-Copy `.env.example` to `.env` and fill in your API key:
-
-```bash
-cp .env.example .env
 ```
 
 ## Usage
@@ -97,8 +92,9 @@ cp .env.example .env
 ### Channel Management
 
 ```bash
-ytglean channel add <url-or-id> [--name "Name"]
-ytglean channel remove <url-or-id-or-name>
+ytglean channel add <url-or-id>              # Name auto-extracted from YouTube
+ytglean channel add @Fireship --name "Fire"  # Override display name
+ytglean channel remove <url-or-id-or-name>   # Remove by URL, ID, or name
 ytglean channel list [--json]
 ```
 
@@ -151,7 +147,6 @@ MCP tools available: `list_channels`, `search_transcripts`, `get_transcript`, `g
 
 | Flag | Description |
 |---|---|
-| `--config <path>` | Override config file |
 | `--db <path>` | Override database path |
 | `--log-level <level>` | debug, info, warn, error |
 | `--quiet` | Suppress non-error output |

@@ -12,7 +12,6 @@ import (
 )
 
 var (
-	cfgFile  string
 	dbPath   string
 	logLevel string
 	quiet    bool
@@ -50,32 +49,19 @@ func Execute() {
 func init() {
 	cobra.OnInitialize(initConfig)
 
-	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default ~/.config/ytglean/config.yaml)")
 	rootCmd.PersistentFlags().StringVar(&dbPath, "db", "", "database path override")
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level (debug, info, warn, error)")
 	rootCmd.PersistentFlags().BoolVar(&quiet, "quiet", false, "suppress non-error output")
 }
 
 func initConfig() {
-	if cfgFile != "" {
-		viper.SetConfigFile(cfgFile)
-	} else {
-		// Check YTGLEAN_CONFIG env var
-		if envCfg := os.Getenv("YTGLEAN_CONFIG"); envCfg != "" {
-			viper.SetConfigFile(envCfg)
-		} else {
-			configDir, err := os.UserConfigDir()
-			if err == nil {
-				viper.AddConfigPath(filepath.Join(configDir, "ytglean"))
-			}
-			viper.AddConfigPath(".")
-			viper.SetConfigName("config")
-			viper.SetConfigType("yaml")
-		}
+	configDir, err := os.UserConfigDir()
+	if err == nil {
+		viper.AddConfigPath(filepath.Join(configDir, "ytglean"))
 	}
-
-	viper.SetEnvPrefix("YTGLEAN")
-	viper.AutomaticEnv()
+	viper.AddConfigPath(".")
+	viper.SetConfigName("config")
+	viper.SetConfigType("yaml")
 
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {

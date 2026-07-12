@@ -73,7 +73,7 @@ func Load() (*Config, error) {
 		Summarizer: SummarizerConfig{
 			Endpoint:  "https://api.openai.com/v1",
 			Model:     "gpt-4o-mini",
-			MaxTokens: 1024,
+			MaxTokens: 2048,
 		},
 		MCP: MCPConfig{
 			Transport: "stdio",
@@ -83,11 +83,6 @@ func Load() (*Config, error) {
 
 	if err := viper.Unmarshal(cfg); err != nil {
 		return nil, err
-	}
-
-	// API key from env takes precedence
-	if key := os.Getenv("YTGLEAN_API_KEY"); key != "" {
-		cfg.Summarizer.APIKey = key
 	}
 
 	return cfg, nil
@@ -117,10 +112,10 @@ transcript:
   fetch_delay: 2s       # delay between fetch requests to avoid rate limiting
 
 summarizer:
-  # endpoint: https://api.openai.com/v1
-  # api_key: set via YTGLEAN_API_KEY env var
+  endpoint: https://api.openai.com/v1
+  api_key: your-api-key-here
   model: gpt-4o-mini
-  max_tokens: 1024
+  max_tokens: 2048
 
 mcp:
   transport: stdio      # stdio | http
