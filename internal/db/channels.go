@@ -66,6 +66,28 @@ func (s *Store) ListChannels(ctx context.Context) ([]Channel, error) {
 	return channels, rows.Err()
 }
 
+func (s *Store) GetChannelByName(ctx context.Context, name string) (*Channel, error) {
+	var ch Channel
+	var addedAt string
+	var lastChecked sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, channel_id, name, url, added_at, last_checked FROM channels WHERE name = ?",
+		name,
+	).Scan(&ch.ID, &ch.ChannelID, &ch.Name, &ch.URL, &addedAt, &lastChecked)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting channel by name %s: %w", name, err)
+	}
+	ch.AddedAt, _ = time.Parse("2006-01-02 15:04:05", addedAt)
+	if lastChecked.Valid {
+		t, _ := time.Parse("2006-01-02 15:04:05", lastChecked.String)
+		ch.LastChecked = &t
+	}
+	return &ch, nil
+}
+
 func (s *Store) GetChannelByID(ctx context.Context, channelID string) (*Channel, error) {
 	var ch Channel
 	var addedAt string

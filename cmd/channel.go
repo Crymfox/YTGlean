@@ -34,11 +34,14 @@ var channelAddCmd = &cobra.Command{
 		input := args[0]
 		name, _ := cmd.Flags().GetString("name")
 
-		channelID, channelURL, err := resolveChannel(ctx, input)
+		channelID, channelURL, resolvedName, err := resolveChannel(ctx, input)
 		if err != nil {
 			return fmt.Errorf("resolving channel %q: %w", input, err)
 		}
 
+		if name == "" {
+			name = resolvedName
+		}
 		if name == "" {
 			name = channelID
 		}
@@ -66,14 +69,21 @@ var channelRemoveCmd = &cobra.Command{
 		ctx := cmd.Context()
 		input := args[0]
 
-		// Try as-is first (might be a channel ID)
+		// Try as channel ID first
 		channelID := input
 		if !strings.HasPrefix(input, "UC") {
-			resolved, _, resolveErr := resolveChannel(ctx, input)
+			// Try resolving as URL/handle
+			resolved, _, _, resolveErr := resolveChannel(ctx, input)
 			if resolveErr != nil {
-				return fmt.Errorf("resolving channel %q: %w", input, resolveErr)
+				// Try looking up by name in the database
+				ch, nameErr := store.GetChannelByName(ctx, input)
+				if nameErr != nil || ch == nil {
+					return fmt.Errorf("channel %q not found by URL, handle, or name", input)
+				}
+				channelID = ch.ChannelID
+			} else {
+				channelID = resolved
 			}
-			channelID = resolved
 		}
 
 		if err := store.RemoveChannel(ctx, channelID); err != nil {
@@ -133,72 +143,66 @@ func init() {
 	channelListCmd.Flags().Bool("json", false, "output as JSON")
 }
 
-var (
-	channelIDRegex = regexp.MustCompile(`^UC[\w-]{22}$`)
-	handleRegex    = regexp.MustCompile(`^@[\w.-]+$`)
-)
+var channelIDRegex = regexp.MustCompile(`^UC[\w-]{22}$`)
 
-// resolveChannel takes a URL, handle, or channel ID and returns (channelID, channelURL).
-func resolveChannel(ctx context.Context, input string) (string, string, error) {
+// resolveChannel takes a URL, handle, or channel ID and returns (channelID, channelURL, name, error).
+func resolveChannel(ctx context.Context, input string) (string, string, string, error) {
 	// Bare channel ID
 	if channelIDRegex.MatchString(input) {
-		return input, "https://www.youtube.com/channel/" + input, nil
+		return input, "https://www.youtube.com/channel/" + input, "", nil
 	}
 
-	// Handle without URL
-	if handleRegex.MatchString(input) {
+	// Normalize URL
+	if strings.HasPrefix(input, "@") {
 		input = "https://www.youtube.com/" + input
 	}
 
-	// URL — fetch the page and extract channel ID
-	if strings.Contains(input, "youtube.com") || strings.Contains(input, "youtu.be") {
-		return resolveFromURL(ctx, input)
-	}
-
-	return "", "", fmt.Errorf("unrecognized input format: %q (use a URL, @Handle, or UCxxxx channel ID)", input)
+	return resolveWithHTTP(ctx, input)
 }
 
-func resolveFromURL(ctx context.Context, url string) (string, string, error) {
+// resolveWithHTTP fetches the YouTube page HTML and extracts the channel ID and name.
+func resolveWithHTTP(ctx context.Context, url string) (string, string, string, error) {
+	slog.Debug("resolving channel via HTTP", "url", url)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", "", err
+		return "", "", "", fmt.Errorf("creating request: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	// Bypass YouTube consent page
-	req.Header.Set("Cookie", "CONSENT=PENDING+999; SOCS=CAISEwgDEgk0ODE3Nzk3MjQaAmVuIAEaBgiA_LyaBg")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", fmt.Errorf("fetching channel page: %w", err)
+		return "", "", "", fmt.Errorf("fetching page %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 512*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
 	if err != nil {
-		return "", "", fmt.Errorf("reading channel page: %w", err)
+		return "", "", "", fmt.Errorf("reading page body: %w", err)
 	}
-
 	html := string(body)
 
-	// Try to extract externalId from ytInitialData
-	externalIDRe := regexp.MustCompile(`"externalId"\s*:\s*"(UC[\w-]{22})"`)
-	if m := externalIDRe.FindStringSubmatch(html); len(m) > 1 {
-		channelID := m[1]
-		channelURL := "https://www.youtube.com/channel/" + channelID
-		// Try to extract channel name
-		nameRe := regexp.MustCompile(`<meta\s+property="og:title"\s+content="([^"]+)"`)
-		if nm := nameRe.FindStringSubmatch(html); len(nm) > 1 {
-			slog.Debug("resolved channel", "name", nm[1], "id", channelID)
-		}
-		return channelID, channelURL, nil
+	// Extract channel ID
+	var channelID string
+	if m := regexp.MustCompile(`"browseId"\s*:\s*"(UC[\w-]{22})"`).FindStringSubmatch(html); len(m) > 1 {
+		channelID = m[1]
+	} else if m := regexp.MustCompile(`"externalId"\s*:\s*"(UC[\w-]{22})"`).FindStringSubmatch(html); len(m) > 1 {
+		channelID = m[1]
+	} else if m := regexp.MustCompile(`channel_id=(UC[\w-]{22})`).FindStringSubmatch(html); len(m) > 1 {
+		channelID = m[1]
+	}
+	if channelID == "" {
+		return "", "", "", fmt.Errorf("could not extract channel ID from %s", url)
 	}
 
-	// Try canonical link
-	canonicalRe := regexp.MustCompile(`<link\s+rel="canonical"\s+href="https://www\.youtube\.com/channel/(UC[\w-]{22})"`)
-	if m := canonicalRe.FindStringSubmatch(html); len(m) > 1 {
-		return m[1], "https://www.youtube.com/channel/" + m[1], nil
+	// Extract channel name
+	var name string
+	if m := regexp.MustCompile(`"channelMetadataRenderer"\s*:\s*\{[^}]*"title"\s*:\s*"([^"]+)"`).FindStringSubmatch(html); len(m) > 1 {
+		name = m[1]
+	} else if m := regexp.MustCompile(`<title>([^<]+)\s*-\s*YouTube</title>`).FindStringSubmatch(html); len(m) > 1 {
+		name = strings.TrimSpace(m[1])
 	}
 
-	return "", "", fmt.Errorf("could not extract channel ID from %s", url)
+	return channelID, "https://www.youtube.com/channel/" + channelID, name, nil
 }
