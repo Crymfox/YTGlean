@@ -126,6 +126,11 @@ var fetchCmd = &cobra.Command{
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
+				// Delay between fetches to avoid rate limiting
+				if cfg.Transcript.FetchDelay > 0 {
+					time.Sleep(cfg.Transcript.FetchDelay)
+				}
+
 				slog.Info("fetching transcript", "video", job.entry.VideoID, "title", job.entry.Title)
 
 				// Ensure the video record exists

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/viper"
 )
@@ -20,11 +21,12 @@ type DatabaseConfig struct {
 }
 
 type TranscriptConfig struct {
-	Provider      string   `yaml:"provider"       mapstructure:"provider"`
-	Languages     []string `yaml:"languages"      mapstructure:"languages"`
-	YTDLPVersion  string   `yaml:"ytdlp_version"  mapstructure:"ytdlp_version"`
-	CookieFile    string   `yaml:"cookie_file"    mapstructure:"cookie_file"`
-	MaxConcurrent int      `yaml:"max_concurrent" mapstructure:"max_concurrent"`
+	Provider      string        `yaml:"provider"       mapstructure:"provider"`
+	Languages     []string      `yaml:"languages"      mapstructure:"languages"`
+	YTDLPVersion  string        `yaml:"ytdlp_version"  mapstructure:"ytdlp_version"`
+	CookieFile    string        `yaml:"cookie_file"    mapstructure:"cookie_file"`
+	MaxConcurrent int           `yaml:"max_concurrent" mapstructure:"max_concurrent"`
+	FetchDelay    time.Duration `yaml:"fetch_delay"    mapstructure:"fetch_delay"`
 }
 
 type SummarizerConfig struct {
@@ -66,6 +68,7 @@ func Load() (*Config, error) {
 			Provider:      "auto",
 			Languages:     []string{"en"},
 			MaxConcurrent: 3,
+			FetchDelay:    2 * time.Second,
 		},
 		Summarizer: SummarizerConfig{
 			Endpoint:  "https://api.openai.com/v1",
@@ -111,6 +114,7 @@ transcript:
   languages: [en]
   # cookie_file: ""
   max_concurrent: 3
+  fetch_delay: 2s       # delay between fetch requests to avoid rate limiting
 
 summarizer:
   # endpoint: https://api.openai.com/v1
