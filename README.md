@@ -127,6 +127,15 @@ ytglean summarize --prompt "Custom..."     # Custom system prompt
 
 Skips automatically if the same set of videos was already summarized (compare with `--re-summarize` to force).
 
+### Digests
+
+```bash
+ytglean digests list                       # List all stored digests
+ytglean digests list --json                # Output as JSON
+ytglean digests export <id>                # Export digest to markdown (digest-<id>.md)
+ytglean digests export <id> -o summary.md  # Export to custom file
+```
+
 ### Prune Old Data
 
 ```bash

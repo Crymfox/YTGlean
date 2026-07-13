@@ -168,6 +168,51 @@ func (s *Store) AddDigest(ctx context.Context, d *Digest) error {
 	return nil
 }
 
+// ListDigests returns all digests ordered by most recent first.
+func (s *Store) ListDigests(ctx context.Context) ([]Digest, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, window_start, window_end, channel_filter, model, prompt_template, digest_text, video_count, video_ids, created_at
+		 FROM digests ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("listing digests: %w", err)
+	}
+	defer rows.Close()
+
+	var digests []Digest
+	for rows.Next() {
+		var d Digest
+		var windowStart, windowEnd, createdAt string
+		if err := rows.Scan(&d.ID, &windowStart, &windowEnd, &d.ChannelFilter, &d.Model, &d.PromptTemplate, &d.DigestText, &d.VideoCount, &d.VideoIDs, &createdAt); err != nil {
+			return nil, fmt.Errorf("scanning digest: %w", err)
+		}
+		d.WindowStart, _ = time.Parse("2006-01-02 15:04:05", windowStart)
+		d.WindowEnd, _ = time.Parse("2006-01-02 15:04:05", windowEnd)
+		d.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		digests = append(digests, d)
+	}
+	return digests, rows.Err()
+}
+
+// GetDigest returns a single digest by ID.
+func (s *Store) GetDigest(ctx context.Context, id int64) (*Digest, error) {
+	var d Digest
+	var windowStart, windowEnd, createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, window_start, window_end, channel_filter, model, prompt_template, digest_text, video_count, video_ids, created_at
+		 FROM digests WHERE id = ?`, id,
+	).Scan(&d.ID, &windowStart, &windowEnd, &d.ChannelFilter, &d.Model, &d.PromptTemplate, &d.DigestText, &d.VideoCount, &d.VideoIDs, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting digest %d: %w", id, err)
+	}
+	d.WindowStart, _ = time.Parse("2006-01-02 15:04:05", windowStart)
+	d.WindowEnd, _ = time.Parse("2006-01-02 15:04:05", windowEnd)
+	d.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &d, nil
+}
+
 // GetLatestDigest returns the most recent digest for a given channel filter, or nil if none exists.
 func (s *Store) GetLatestDigest(ctx context.Context, channelFilter string) (*Digest, error) {
 	var d Digest
