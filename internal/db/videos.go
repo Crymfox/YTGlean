@@ -90,6 +90,54 @@ func (s *Store) ListRecentVideos(ctx context.Context, since time.Time) ([]Video,
 	)
 }
 
+type VideoListItem struct {
+	VideoID       string     `json:"video_id"`
+	Title         string     `json:"title"`
+	ChannelID     string     `json:"channel_id"`
+	ChannelName   string     `json:"channel_name"`
+	PublishedAt   *time.Time `json:"published_at"`
+	HasTranscript bool       `json:"has_transcript"`
+}
+
+func (s *Store) ListVideosWithMetadata(ctx context.Context, channelID string, limit int) ([]VideoListItem, error) {
+	query := `SELECT v.video_id, v.title, v.channel_id, COALESCE(c.name, ''),
+	                 v.published_at,
+	                 EXISTS(SELECT 1 FROM transcripts t WHERE t.video_id = v.video_id)
+	          FROM videos v
+	          LEFT JOIN channels c ON v.channel_id = c.channel_id`
+	args := []any{}
+	if channelID != "" {
+		query += " WHERE v.channel_id = ?"
+		args = append(args, channelID)
+	}
+	query += " ORDER BY v.published_at DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing videos with metadata: %w", err)
+	}
+	defer rows.Close()
+
+	var videos []VideoListItem
+	for rows.Next() {
+		var v VideoListItem
+		var publishedAt sql.NullString
+		if err := rows.Scan(&v.VideoID, &v.Title, &v.ChannelID, &v.ChannelName, &publishedAt, &v.HasTranscript); err != nil {
+			return nil, fmt.Errorf("scanning video item: %w", err)
+		}
+		if publishedAt.Valid {
+			t, _ := time.Parse("2006-01-02 15:04:05", publishedAt.String)
+			v.PublishedAt = &t
+		}
+		videos = append(videos, v)
+	}
+	return videos, rows.Err()
+}
+
 func (s *Store) queryVideos(ctx context.Context, query string, args ...any) ([]Video, error) {
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {

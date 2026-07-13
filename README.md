@@ -153,7 +153,20 @@ ytglean serve --transport http             # HTTP transport
 ytglean serve --port 8080                  # Custom port
 ```
 
-MCP tools available: `list_channels`, `search_transcripts`, `get_transcript`, `get_summary`, `get_recent_videos`, `fetch_new`.
+MCP tools available:
+
+| Tool | Description |
+|---|---|
+| `list_channels` | List all tracked channels |
+| `search_transcripts` | Full-text search with video titles, channel names, word-bounded excerpts |
+| `get_transcript` | Get full transcript (supports language, max_chars, timestamped format) |
+| `get_video_info` | Video metadata without full transcript (title, channel, word count) |
+| `get_recent_videos` | List recent videos from tracked channels |
+| `list_videos` | Browse all stored videos with transcript status |
+| `list_digests` | List stored summaries with metadata |
+| `get_digest` | Read a specific digest's full text |
+| `fetch_new` | Fetch new transcripts from YouTube |
+| `summarize` | Summarize via LLM (requires API key) or guide agent to self-summarize |
 
 ### Global Flags
 

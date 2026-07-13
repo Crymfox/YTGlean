@@ -24,7 +24,7 @@ var serveCmd = &cobra.Command{
 		port, _ := cmd.Flags().GetInt("port")
 
 		provider := transcript.NewProvider(cfg.Transcript.Provider, cfg.Transcript.CookieFile)
-		s := mcpserver.NewServer(store, provider, cfg.Transcript.Languages, Version)
+		s := mcpserver.NewServer(store, provider, cfg.Transcript.Languages, Version, &cfg.Summarizer)
 
 		switch transport {
 		case "http":

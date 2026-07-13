@@ -47,6 +47,106 @@ func (s *Store) AddTranscript(ctx context.Context, videoID, language, contentJSO
 	return nil
 }
 
+// TranscriptSearchResult extends Transcript with video/channel metadata.
+type TranscriptSearchResult struct {
+	Transcript
+	VideoTitle  string     `json:"video_title"`
+	ChannelName string     `json:"channel_name"`
+	PublishedAt *time.Time `json:"published_at"`
+}
+
+// SearchTranscriptsWithMetadata searches transcripts and returns video title, channel name, and date.
+func (s *Store) SearchTranscriptsWithMetadata(ctx context.Context, query string, channelID string, limit int) ([]TranscriptSearchResult, error) {
+	sqlQuery := `SELECT t.id, t.video_id, t.language, t.content_json, t.content_text, t.provider, t.created_at,
+	                    COALESCE(v.title, ''), COALESCE(c.name, ''), v.published_at
+	             FROM transcripts t
+	             JOIN videos v ON t.video_id = v.video_id
+	             LEFT JOIN channels c ON v.channel_id = c.channel_id
+	             WHERE t.content_text LIKE ?`
+	args := []any{"%" + query + "%"}
+	if channelID != "" {
+		sqlQuery += " AND v.channel_id = ?"
+		args = append(args, channelID)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	sqlQuery += " ORDER BY t.created_at DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("searching transcripts with metadata: %w", err)
+	}
+	defer rows.Close()
+
+	var results []TranscriptSearchResult
+	for rows.Next() {
+		var r TranscriptSearchResult
+		var createdAt string
+		var publishedAt sql.NullString
+		if err := rows.Scan(&r.ID, &r.VideoID, &r.Language, &r.ContentJSON, &r.ContentText, &r.Provider, &createdAt,
+			&r.VideoTitle, &r.ChannelName, &publishedAt); err != nil {
+			return nil, fmt.Errorf("scanning transcript search result: %w", err)
+		}
+		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		if publishedAt.Valid {
+			t, _ := time.Parse("2006-01-02 15:04:05", publishedAt.String)
+			r.PublishedAt = &t
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// TranscriptStats holds metadata about a transcript without loading the full content.
+type TranscriptStats struct {
+	Language  string `json:"language"`
+	CharCount int    `json:"char_count"`
+	HasJSON   bool   `json:"has_json"`
+	Provider  string `json:"provider"`
+}
+
+// GetTranscriptStats returns metadata about a transcript without loading full content.
+func (s *Store) GetTranscriptStats(ctx context.Context, videoID string) (*TranscriptStats, error) {
+	var stats TranscriptStats
+	var charCount int64
+	var hasJSON int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT language, COALESCE(LENGTH(content_text), 0),
+		        (CASE WHEN content_json IS NOT NULL AND content_json != '' THEN 1 ELSE 0 END),
+		        provider
+		 FROM transcripts WHERE video_id = ? LIMIT 1`, videoID,
+	).Scan(&stats.Language, &charCount, &hasJSON, &stats.Provider)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting transcript stats for %s: %w", videoID, err)
+	}
+	stats.CharCount = int(charCount)
+	stats.HasJSON = hasJSON == 1
+	return &stats, nil
+}
+
+// GetTranscriptAnyLanguage returns a transcript for a video in any available language.
+func (s *Store) GetTranscriptAnyLanguage(ctx context.Context, videoID string) (*Transcript, error) {
+	t := &Transcript{}
+	var createdAt string
+	err := s.db.QueryRowContext(ctx,
+		"SELECT id, video_id, language, content_json, content_text, provider, created_at FROM transcripts WHERE video_id = ? LIMIT 1",
+		videoID,
+	).Scan(&t.ID, &t.VideoID, &t.Language, &t.ContentJSON, &t.ContentText, &t.Provider, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting transcript for %s: %w", videoID, err)
+	}
+	t.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return t, nil
+}
+
 func (s *Store) GetTranscript(ctx context.Context, videoID, language string) (*Transcript, error) {
 	t := &Transcript{}
 	var createdAt string
