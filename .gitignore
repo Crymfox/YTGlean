@@ -1,6 +1,7 @@
 # Binaries
 ytglean
 *.exe
+dist/
 
 # Go
 vendor/
