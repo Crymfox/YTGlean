@@ -55,6 +55,9 @@ var migrations = []string{
 	CREATE INDEX IF NOT EXISTS idx_videos_published_at ON videos(published_at);
 	CREATE INDEX IF NOT EXISTS idx_transcripts_video_id ON transcripts(video_id);
 	CREATE INDEX IF NOT EXISTS idx_digests_window ON digests(window_start, window_end);`,
+
+	// Migration 002: Add video_ids to digests for dedup
+	`ALTER TABLE digests ADD COLUMN video_ids TEXT NOT NULL DEFAULT '[]';`,
 }
 
 func (s *Store) migrate() error {

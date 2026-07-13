@@ -117,12 +117,15 @@ ytglean fetch --dry-run                    # Preview without fetching
 ### Summarize
 
 ```bash
-ytglean summarize                          # All unsummarized transcripts
-ytglean summarize --video <id>             # Specific video
-ytglean summarize --channel <id>           # All from a channel
-ytglean summarize --re-summarize           # Regenerate existing summaries
-ytglean summarize --prompt "Custom..."     # Custom prompt
+ytglean summarize                          # Summarize transcripts from last 24h
+ytglean summarize --since 7d               # Last 7 days
+ytglean summarize --channel <id>           # Filter to specific channel
+ytglean summarize --video <id>             # Summarize a specific video
+ytglean summarize --re-summarize           # Force re-summarize even if videos unchanged
+ytglean summarize --prompt "Custom..."     # Custom system prompt
 ```
+
+Skips automatically if the same set of videos was already summarized (compare with `--re-summarize` to force).
 
 ### Prune Old Data
 

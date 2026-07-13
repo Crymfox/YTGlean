@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +27,8 @@ var summarizeCmd = &cobra.Command{
 		sinceStr, _ := cmd.Flags().GetString("since")
 		channelFilter, _ := cmd.Flags().GetString("channel")
 		customPrompt, _ := cmd.Flags().GetString("prompt")
+		reSummarize, _ := cmd.Flags().GetBool("re-summarize")
+		videoID, _ := cmd.Flags().GetString("video")
 
 		since := 24 * time.Hour
 		if sinceStr != "" {
@@ -42,9 +46,19 @@ var summarizeCmd = &cobra.Command{
 		windowEnd := time.Now()
 		windowStart := windowEnd.Add(-since)
 
-		transcripts, err := store.GetTranscriptsInWindow(ctx, windowStart, windowEnd, channelFilter)
-		if err != nil {
-			return err
+		var transcripts []db.Transcript
+		if videoID != "" {
+			// Single video mode
+			t, err := store.GetTranscript(ctx, videoID, cfg.Transcript.Languages[0])
+			if err != nil || t == nil {
+				return fmt.Errorf("no transcript found for video %s", videoID)
+			}
+			transcripts = append(transcripts, *t)
+		} else {
+			transcripts, err = store.GetTranscriptsInWindow(ctx, windowStart, windowEnd, channelFilter)
+			if err != nil {
+				return err
+			}
 		}
 
 		if len(transcripts) == 0 {
@@ -52,10 +66,36 @@ var summarizeCmd = &cobra.Command{
 			return nil
 		}
 
+		// Collect current video IDs and sort for stable comparison
+		currentVideoIDs := make([]string, 0, len(transcripts))
+		for _, t := range transcripts {
+			currentVideoIDs = append(currentVideoIDs, t.VideoID)
+		}
+		sort.Strings(currentVideoIDs)
+		currentJSON, _ := json.Marshal(currentVideoIDs)
+
+		// Check for existing digest with same video set
+		if !reSummarize && videoID == "" {
+			latestDigest, err := store.GetLatestDigest(ctx, channelFilter)
+			if err != nil {
+				slog.Warn("could not check existing digest", "error", err)
+			}
+			if latestDigest != nil {
+				var existingIDs []string
+				if err := json.Unmarshal([]byte(latestDigest.VideoIDs), &existingIDs); err == nil {
+					sort.Strings(existingIDs)
+					existingJSON, _ := json.Marshal(existingIDs)
+					if string(existingJSON) == string(currentJSON) {
+						fmt.Printf("Already summarized these %d videos. Use --re-summarize to force.\n", len(transcripts))
+						return nil
+					}
+				}
+			}
+		}
+
 		// Build the combined transcript text
 		var combined strings.Builder
 		for i, t := range transcripts {
-			// Get video info for context
 			video, err := store.GetVideo(ctx, t.VideoID)
 			if err != nil {
 				slog.Warn("could not get video info", "video_id", t.VideoID, "error", err)
@@ -77,7 +117,6 @@ var summarizeCmd = &cobra.Command{
 
 		text := combined.String()
 
-		// Rough token estimate: 4 chars per token
 		estimatedTokens := len(text) / 4
 		slog.Info("summarizing transcripts",
 			"count", len(transcripts),
@@ -101,6 +140,7 @@ var summarizeCmd = &cobra.Command{
 			PromptTemplate: customPrompt,
 			DigestText:     result.Summary,
 			VideoCount:     len(transcripts),
+			VideoIDs:       string(currentJSON),
 		}
 		if err := store.AddDigest(ctx, digest); err != nil {
 			slog.Error("failed to store digest", "error", err)
@@ -121,4 +161,6 @@ func init() {
 	summarizeCmd.Flags().String("since", "24h", "time window for transcripts (e.g. 24h, 48h, 168h)")
 	summarizeCmd.Flags().String("channel", "", "filter to specific channel (ID or name)")
 	summarizeCmd.Flags().String("prompt", "", "custom system prompt for summarization")
+	summarizeCmd.Flags().Bool("re-summarize", false, "force re-summarize even if video set hasn't changed")
+	summarizeCmd.Flags().String("video", "", "summarize a specific video by ID")
 }

@@ -26,6 +26,7 @@ type Digest struct {
 	PromptTemplate string
 	DigestText     string
 	VideoCount     int
+	VideoIDs       string // JSON array of video IDs
 	CreatedAt      time.Time
 }
 
@@ -155,16 +156,37 @@ func (s *Store) SearchTranscripts(ctx context.Context, query string, channelID s
 // AddDigest stores a digest summary for a time window.
 func (s *Store) AddDigest(ctx context.Context, d *Digest) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO digests (window_start, window_end, channel_filter, model, prompt_template, digest_text, video_count)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO digests (window_start, window_end, channel_filter, model, prompt_template, digest_text, video_count, video_ids)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.WindowStart.UTC().Format("2006-01-02 15:04:05"),
 		d.WindowEnd.UTC().Format("2006-01-02 15:04:05"),
-		d.ChannelFilter, d.Model, d.PromptTemplate, d.DigestText, d.VideoCount,
+		d.ChannelFilter, d.Model, d.PromptTemplate, d.DigestText, d.VideoCount, d.VideoIDs,
 	)
 	if err != nil {
 		return fmt.Errorf("adding digest: %w", err)
 	}
 	return nil
+}
+
+// GetLatestDigest returns the most recent digest for a given channel filter, or nil if none exists.
+func (s *Store) GetLatestDigest(ctx context.Context, channelFilter string) (*Digest, error) {
+	var d Digest
+	var windowStart, windowEnd, createdAt string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, window_start, window_end, channel_filter, model, prompt_template, digest_text, video_count, video_ids, created_at
+		 FROM digests WHERE channel_filter = ? ORDER BY created_at DESC LIMIT 1`,
+		channelFilter,
+	).Scan(&d.ID, &windowStart, &windowEnd, &d.ChannelFilter, &d.Model, &d.PromptTemplate, &d.DigestText, &d.VideoCount, &d.VideoIDs, &createdAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting latest digest: %w", err)
+	}
+	d.WindowStart, _ = time.Parse("2006-01-02 15:04:05", windowStart)
+	d.WindowEnd, _ = time.Parse("2006-01-02 15:04:05", windowEnd)
+	d.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+	return &d, nil
 }
 
 // PruneOlderThan deletes videos (and cascading transcripts) older than the given time.
