@@ -47,7 +47,9 @@ jobs:
         run: |
           docker run --rm -v "$PWD:/src" -w /src archlinux:latest bash -c "
             pacman -Sy --noconfirm base-devel &&
-            cd aur/ytglean-bin && makepkg --printsrcinfo > .SRCINFO
+            useradd -m builder &&
+            chown -R builder:builder /src &&
+            su - builder -c 'cd /src/aur/ytglean-bin && makepkg --printsrcinfo > .SRCINFO'
           "
 
       - name: Publish ytglean-bin to AUR
