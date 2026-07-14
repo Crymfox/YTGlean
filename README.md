@@ -22,11 +22,23 @@ Glean transcripts from YouTube channels, store them in SQLite, summarize via LLM
 
 ## Install
 
+### Arch Linux (AUR)
+
+```bash
+# Using yay
+yay -S ytglean-bin
+
+# Using paru
+paru -S ytglean-bin
+```
+
+### Go
+
 ```bash
 go install github.com/CrymfoxLabs/YTGlean@latest
 ```
 
-Or build from source:
+### Build from source
 
 ```bash
 git clone https://github.com/CrymfoxLabs/YTGlean.git
