@@ -57,6 +57,8 @@ jobs:
         with:
           pkgname: ytglean-bin
           pkgbuild: aur/ytglean-bin/PKGBUILD
+          assets: |
+            aur/ytglean-bin/ytglean-bin.install
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_username: "Crymfox"
           commit_email: "crymfox@users.noreply.github.com"
