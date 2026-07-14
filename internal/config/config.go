@@ -5,14 +5,16 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/CrymfoxLabs/YTGlean/internal/ratelimit"
 	"github.com/spf13/viper"
 )
 
 type Config struct {
-	Database   DatabaseConfig   `yaml:"database"   mapstructure:"database"`
-	Transcript TranscriptConfig `yaml:"transcript" mapstructure:"transcript"`
-	Summarizer SummarizerConfig `yaml:"summarizer" mapstructure:"summarizer"`
-	MCP        MCPConfig        `yaml:"mcp"        mapstructure:"mcp"`
+	Database   DatabaseConfig    `yaml:"database"   mapstructure:"database"`
+	Transcript TranscriptConfig  `yaml:"transcript" mapstructure:"transcript"`
+	RateLimit  ratelimit.Config  `yaml:"ratelimit"  mapstructure:"ratelimit"`
+	Summarizer SummarizerConfig  `yaml:"summarizer" mapstructure:"summarizer"`
+	MCP        MCPConfig         `yaml:"mcp"        mapstructure:"mcp"`
 }
 
 type DatabaseConfig struct {
@@ -70,6 +72,7 @@ func Load() (*Config, error) {
 			MaxConcurrent: 3,
 			FetchDelay:    2 * time.Second,
 		},
+		RateLimit: ratelimit.DefaultConfig(),
 		Summarizer: SummarizerConfig{
 			Endpoint:  "https://api.openai.com/v1",
 			Model:     "gpt-4o-mini",
@@ -109,7 +112,20 @@ transcript:
   languages: [en]
   # cookie_file: ""
   max_concurrent: 3
-  fetch_delay: 2s       # delay between fetch requests to avoid rate limiting
+  fetch_delay: 2s       # delay between fetch requests (used if ratelimit disabled)
+
+ratelimit:
+  feed:
+    requests_per_second: 2.0
+    burst: 5
+  innertube:
+    requests_per_second: 1.0   # 60/min, safe for guest sessions
+    burst: 3
+  ytdlp:
+    requests_per_second: 0.167 # 10/min, conservative for guest sessions
+    burst: 1
+  backoff_multiplier: 0.5      # halve rate on 429 errors
+  recovery_seconds: 60         # time before rate recovers after backoff
 
 summarizer:
   endpoint: https://api.openai.com/v1

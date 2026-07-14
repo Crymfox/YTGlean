@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -180,6 +181,46 @@ func (s *Store) HasAnyTranscript(ctx context.Context, videoID string) (bool, err
 		videoID,
 	).Scan(&exists)
 	return exists, err
+}
+
+// HasAnyTranscripts returns a map of videoID -> hasTranscript for batch checking.
+func (s *Store) HasAnyTranscripts(ctx context.Context, videoIDs []string) (map[string]bool, error) {
+	result := make(map[string]bool, len(videoIDs))
+	if len(videoIDs) == 0 {
+		return result, nil
+	}
+
+	// Build placeholders
+	placeholders := make([]string, len(videoIDs))
+	args := make([]any, len(videoIDs))
+	for i, id := range videoIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := "SELECT DISTINCT video_id FROM transcripts WHERE video_id IN (" + strings.Join(placeholders, ",") + ")"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch checking transcripts: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var videoID string
+		if err := rows.Scan(&videoID); err != nil {
+			return nil, fmt.Errorf("scanning transcript batch result: %w", err)
+		}
+		result[videoID] = true
+	}
+
+	// Mark unchecked IDs as false
+	for _, id := range videoIDs {
+		if !result[id] {
+			result[id] = false
+		}
+	}
+
+	return result, rows.Err()
 }
 
 // GetTranscriptsInWindow returns all transcripts for videos published within the given time window.

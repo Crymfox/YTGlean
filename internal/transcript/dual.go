@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -11,10 +12,16 @@ import (
 type DualProvider struct {
 	primary  Provider
 	fallback Provider
+	backoff  func() // optional callback for rate-limit backoff
 }
 
 func NewDualProvider(primary, fallback Provider) *DualProvider {
 	return &DualProvider{primary: primary, fallback: fallback}
+}
+
+// SetBackoffCallback sets a function to call when a rate-limit error is detected.
+func (d *DualProvider) SetBackoffCallback(fn func()) {
+	d.backoff = fn
 }
 
 func (d *DualProvider) Name() string {
@@ -29,6 +36,20 @@ func (d *DualProvider) FetchTranscript(ctx context.Context, videoID string, lang
 		return t, nil
 	}
 
+	// Don't fallback on permanent errors (no transcript exists)
+	if IsPermanentError(err) {
+		slog.Debug("no transcript available, skipping fallback",
+			"provider", d.primary.Name(), "video", videoID)
+		return nil, err
+	}
+
+	// Check for rate-limit errors and trigger backoff
+	if isRateLimitError(err) && d.backoff != nil {
+		slog.Warn("rate limit detected on primary provider, backing off",
+			"provider", d.primary.Name(), "video", videoID)
+		d.backoff()
+	}
+
 	slog.Warn("primary provider exhausted retries, trying fallback",
 		"provider", d.primary.Name(),
 		"fallback", d.fallback.Name(),
@@ -39,9 +60,39 @@ func (d *DualProvider) FetchTranscript(ctx context.Context, videoID string, lang
 		return d.fallback.FetchTranscript(ctx, videoID, languages)
 	})
 	if err != nil {
+		// Check for rate-limit errors on fallback too
+		if isRateLimitError(err) && d.backoff != nil {
+			slog.Warn("rate limit detected on fallback provider, backing off",
+				"provider", d.fallback.Name(), "video", videoID)
+			d.backoff()
+		}
 		return nil, fmt.Errorf("all providers failed for %s: primary exhausted, fallback: %w", videoID, err)
 	}
 	return t, nil
+}
+
+// isRateLimitError checks if an error is related to rate limiting.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "429") ||
+		strings.Contains(errStr, "402") ||
+		strings.Contains(errStr, "Too Many Requests") ||
+		strings.Contains(errStr, "RequestBlocked") ||
+		strings.Contains(errStr, "rate limit")
+}
+
+// IsPermanentError checks if an error indicates no transcript exists (not retryable).
+func IsPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "no transcript found") ||
+		strings.Contains(errStr, "no segments found") ||
+		strings.Contains(errStr, "subtitle file not found")
 }
 
 func retryWithBackoff(ctx context.Context, maxAttempts int, baseDelay time.Duration, fn func() (*Transcript, error)) (*Transcript, error) {
@@ -53,6 +104,12 @@ func retryWithBackoff(ctx context.Context, maxAttempts int, baseDelay time.Durat
 			return t, nil
 		}
 		lastErr = err
+
+		// Don't retry permanent errors (no transcript exists)
+		if IsPermanentError(err) {
+			return nil, err
+		}
+
 		if attempt < maxAttempts-1 {
 			slog.Warn("retrying after failure",
 				"attempt", attempt+1,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -41,6 +42,46 @@ func (s *Store) HasVideo(ctx context.Context, videoID string) (bool, error) {
 		"SELECT EXISTS(SELECT 1 FROM videos WHERE video_id = ?)", videoID,
 	).Scan(&exists)
 	return exists, err
+}
+
+// HasVideos returns a map of videoID -> exists for batch checking.
+func (s *Store) HasVideos(ctx context.Context, videoIDs []string) (map[string]bool, error) {
+	result := make(map[string]bool, len(videoIDs))
+	if len(videoIDs) == 0 {
+		return result, nil
+	}
+
+	// Build placeholders
+	placeholders := make([]string, len(videoIDs))
+	args := make([]any, len(videoIDs))
+	for i, id := range videoIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	query := "SELECT video_id FROM videos WHERE video_id IN (" + strings.Join(placeholders, ",") + ")"
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("batch checking videos: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var videoID string
+		if err := rows.Scan(&videoID); err != nil {
+			return nil, fmt.Errorf("scanning video batch result: %w", err)
+		}
+		result[videoID] = true
+	}
+
+	// Mark unchecked IDs as false
+	for _, id := range videoIDs {
+		if !result[id] {
+			result[id] = false
+		}
+	}
+
+	return result, rows.Err()
 }
 
 func (s *Store) GetVideo(ctx context.Context, videoID string) (*Video, error) {
