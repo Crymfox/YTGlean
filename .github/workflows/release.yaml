@@ -61,4 +61,4 @@ jobs:
             aur/ytglean-bin/ytglean-bin.install
           ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
           commit_username: "Crymfox"
-          commit_email: "crymfox@users.noreply.github.com"
+          commit_email: "sameur.bh@gmail.com"
