@@ -124,9 +124,9 @@ func findSubtitleFile(dir, videoID string) (string, error) {
 
 // json3Event represents an event in YouTube's json3 subtitle format.
 type json3Event struct {
-	TStartMs    int64       `json:"tStartMs"`
-	DDurationMs int64       `json:"dDurationMs"`
-	Segs        []json3Seg  `json:"segs"`
+	TStartMs    int64      `json:"tStartMs"`
+	DDurationMs int64      `json:"dDurationMs"`
+	Segs        []json3Seg `json:"segs"`
 }
 
 type json3Seg struct {
