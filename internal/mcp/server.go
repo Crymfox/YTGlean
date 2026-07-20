@@ -9,9 +9,8 @@ import (
 
 	"github.com/CrymfoxLabs/YTGlean/internal/config"
 	"github.com/CrymfoxLabs/YTGlean/internal/db"
-	"github.com/CrymfoxLabs/YTGlean/internal/feed"
+	"github.com/CrymfoxLabs/YTGlean/internal/fetcher"
 	"github.com/CrymfoxLabs/YTGlean/internal/summarizer"
-	"github.com/CrymfoxLabs/YTGlean/internal/transcript"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
@@ -49,7 +48,7 @@ func truncateToWordBoundary(s string, maxLen int) string {
 }
 
 // NewServer creates an MCP server with all YTGlean tools registered.
-func NewServer(store *db.Store, provider transcript.Provider, languages []string, version string, summarizerCfg *config.SummarizerConfig) *server.MCPServer {
+func NewServer(store *db.Store, f *fetcher.Fetcher, languages []string, version string, summarizerCfg *config.SummarizerConfig) *server.MCPServer {
 	s := server.NewMCPServer(
 		"YTGlean",
 		version,
@@ -99,7 +98,7 @@ func NewServer(store *db.Store, provider transcript.Provider, languages []string
 			mcplib.WithString("channel", mcplib.Description("Filter to a specific channel ID or name")),
 			mcplib.WithString("since", mcplib.Description("Time window, e.g. '24h' (default: '24h')")),
 		),
-		fetchNewHandler(store, provider, languages),
+		fetchNewHandler(store, f),
 	)
 
 	s.AddTool(
@@ -287,7 +286,7 @@ func getRecentVideosHandler(store *db.Store) server.ToolHandlerFunc {
 	}
 }
 
-func fetchNewHandler(store *db.Store, provider transcript.Provider, languages []string) server.ToolHandlerFunc {
+func fetchNewHandler(store *db.Store, f *fetcher.Fetcher) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		channelFilter := req.GetString("channel", "")
 		sinceStr := req.GetString("since", "")
@@ -310,45 +309,24 @@ func fetchNewHandler(store *db.Store, provider transcript.Provider, languages []
 		if err != nil {
 			return errorResult(err), nil
 		}
-
-		var successCount, failCount int
-		for _, ch := range channels {
-			if channelID != "" && ch.ChannelID != channelID {
-				continue
-			}
-
-			entries, err := feed.FetchNewVideos(ctx, ch.ChannelID, sinceTime)
-			if err != nil {
-				failCount++
-				continue
-			}
-
-			for _, entry := range entries {
-				has, _ := store.HasAnyTranscript(ctx, entry.VideoID)
-				if has {
-					continue
+		if channelID != "" {
+			var filtered []db.Channel
+			for _, ch := range channels {
+				if ch.ChannelID == channelID {
+					filtered = append(filtered, ch)
 				}
-
-				pubTime := entry.Published
-				_ = store.AddVideo(ctx, entry.VideoID, ch.ChannelID, entry.Title, &pubTime)
-
-				tx, err := provider.FetchTranscript(ctx, entry.VideoID, languages)
-				if err != nil {
-					failCount++
-					continue
-				}
-
-				if err := store.AddTranscript(ctx, tx.VideoID, tx.Language, tx.RawJSON, tx.FullText, tx.Provider); err != nil {
-					failCount++
-					continue
-				}
-				successCount++
 			}
-
-			_ = store.UpdateLastChecked(ctx, ch.ChannelID)
+			channels = filtered
 		}
 
-		return mcplib.NewToolResultText(fmt.Sprintf("Fetched %d transcripts, %d failures", successCount, failCount)), nil
+		res, err := f.Run(ctx, channels, sinceTime)
+		if err != nil {
+			return errorResult(err), nil
+		}
+
+		return mcplib.NewToolResultText(fmt.Sprintf(
+			"Discovered %d new video(s): %d transcripts fetched, %d without transcripts, %d failed (will retry), %d dead",
+			res.Discovered, res.Succeeded, res.NoTranscript, res.Failed, res.Dead)), nil
 	}
 }
 
@@ -461,10 +439,10 @@ func getVideoInfoHandler(store *db.Store) server.ToolHandlerFunc {
 		}
 
 		info := videoInfo{
-			VideoID:      video.VideoID,
-			Title:        video.Title,
-			ChannelID:    video.ChannelID,
-			ChannelName:  channelName,
+			VideoID:       video.VideoID,
+			Title:         video.Title,
+			ChannelID:     video.ChannelID,
+			ChannelName:   channelName,
 			HasTranscript: stats != nil,
 		}
 		if video.PublishedAt != nil {
