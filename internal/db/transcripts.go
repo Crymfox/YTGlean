@@ -56,8 +56,87 @@ type TranscriptSearchResult struct {
 	PublishedAt *time.Time `json:"published_at"`
 }
 
-// SearchTranscriptsWithMetadata searches transcripts and returns video title, channel name, and date.
+// ftsQuery converts a raw user query into a safe FTS5 MATCH expression.
+// Each whitespace-separated term is double-quoted (treated as a literal
+// phrase token), joined with implicit AND. A trailing * on a term is
+// preserved as a prefix match.
+func ftsQuery(query string) string {
+	terms := strings.Fields(query)
+	if len(terms) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(terms))
+	for _, term := range terms {
+		prefix := strings.HasSuffix(term, "*")
+		term = strings.Trim(term, "*")
+		term = strings.ReplaceAll(term, `"`, `""`)
+		if term == "" {
+			continue
+		}
+		q := `"` + term + `"`
+		if prefix {
+			q += "*"
+		}
+		quoted = append(quoted, q)
+	}
+	return strings.Join(quoted, " ")
+}
+
+// SearchTranscriptsWithMetadata performs a full-text search (FTS5, bm25-ranked)
+// and returns video title, channel name, and date. Falls back to a LIKE scan
+// if the FTS query cannot be parsed.
 func (s *Store) SearchTranscriptsWithMetadata(ctx context.Context, query string, channelID string, limit int) ([]TranscriptSearchResult, error) {
+	match := ftsQuery(query)
+	if match == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	sqlQuery := `SELECT t.id, t.video_id, t.language, t.content_json, t.content_text, t.provider, t.created_at,
+	                    COALESCE(v.title, ''), COALESCE(c.name, ''), v.published_at
+	             FROM transcripts_fts f
+	             JOIN transcripts t ON t.id = f.rowid
+	             JOIN videos v ON t.video_id = v.video_id
+	             LEFT JOIN channels c ON v.channel_id = c.channel_id
+	             WHERE transcripts_fts MATCH ?`
+	args := []any{match}
+	if channelID != "" {
+		sqlQuery += " AND v.channel_id = ?"
+		args = append(args, channelID)
+	}
+	sqlQuery += " ORDER BY bm25(transcripts_fts) LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		// Fall back to LIKE for queries FTS can't handle
+		return s.searchTranscriptsWithMetadataLike(ctx, query, channelID, limit)
+	}
+	defer rows.Close()
+
+	var results []TranscriptSearchResult
+	for rows.Next() {
+		var r TranscriptSearchResult
+		var createdAt string
+		var publishedAt sql.NullString
+		if err := rows.Scan(&r.ID, &r.VideoID, &r.Language, &r.ContentJSON, &r.ContentText, &r.Provider, &createdAt,
+			&r.VideoTitle, &r.ChannelName, &publishedAt); err != nil {
+			return nil, fmt.Errorf("scanning transcript search result: %w", err)
+		}
+		r.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
+		if publishedAt.Valid {
+			t, _ := time.Parse("2006-01-02 15:04:05", publishedAt.String)
+			r.PublishedAt = &t
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
+// searchTranscriptsWithMetadataLike is the LIKE-based fallback search.
+func (s *Store) searchTranscriptsWithMetadataLike(ctx context.Context, query string, channelID string, limit int) ([]TranscriptSearchResult, error) {
 	sqlQuery := `SELECT t.id, t.video_id, t.language, t.content_json, t.content_text, t.provider, t.created_at,
 	                    COALESCE(v.title, ''), COALESCE(c.name, ''), v.published_at
 	             FROM transcripts t
@@ -68,9 +147,6 @@ func (s *Store) SearchTranscriptsWithMetadata(ctx context.Context, query string,
 	if channelID != "" {
 		sqlQuery += " AND v.channel_id = ?"
 		args = append(args, channelID)
-	}
-	if limit <= 0 {
-		limit = 10
 	}
 	sqlQuery += " ORDER BY t.created_at DESC LIMIT ?"
 	args = append(args, limit)
@@ -258,40 +334,17 @@ func (s *Store) GetTranscriptsInWindow(ctx context.Context, start, end time.Time
 	return transcripts, rows.Err()
 }
 
-// SearchTranscripts performs a simple LIKE search across transcript text.
+// SearchTranscripts performs a full-text search (FTS5) across transcript text.
 func (s *Store) SearchTranscripts(ctx context.Context, query string, channelID string, limit int) ([]Transcript, error) {
-	sqlQuery := `SELECT t.id, t.video_id, t.language, t.content_json, t.content_text, t.provider, t.created_at
-		FROM transcripts t
-		JOIN videos v ON t.video_id = v.video_id
-		WHERE t.content_text LIKE ?`
-	args := []any{"%" + query + "%"}
-	if channelID != "" {
-		sqlQuery += " AND v.channel_id = ?"
-		args = append(args, channelID)
-	}
-	if limit <= 0 {
-		limit = 10
-	}
-	sqlQuery += " ORDER BY t.created_at DESC LIMIT ?"
-	args = append(args, limit)
-
-	rows, err := s.db.QueryContext(ctx, sqlQuery, args...)
+	results, err := s.SearchTranscriptsWithMetadata(ctx, query, channelID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("searching transcripts: %w", err)
+		return nil, err
 	}
-	defer rows.Close()
-
-	var transcripts []Transcript
-	for rows.Next() {
-		var t Transcript
-		var createdAt string
-		if err := rows.Scan(&t.ID, &t.VideoID, &t.Language, &t.ContentJSON, &t.ContentText, &t.Provider, &createdAt); err != nil {
-			return nil, fmt.Errorf("scanning transcript: %w", err)
-		}
-		t.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-		transcripts = append(transcripts, t)
+	transcripts := make([]Transcript, 0, len(results))
+	for _, r := range results {
+		transcripts = append(transcripts, r.Transcript)
 	}
-	return transcripts, rows.Err()
+	return transcripts, nil
 }
 
 // AddDigest stores a digest summary for a time window.

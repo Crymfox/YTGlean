@@ -58,6 +58,50 @@ var migrations = []string{
 
 	// Migration 002: Add video_ids to digests for dedup
 	`ALTER TABLE digests ADD COLUMN video_ids TEXT NOT NULL DEFAULT '[]';`,
+
+	// Migration 003: FTS5 full-text index over transcript text (external content table)
+	`CREATE VIRTUAL TABLE IF NOT EXISTS transcripts_fts USING fts5(
+		content_text,
+		content='transcripts',
+		content_rowid='id',
+		tokenize='unicode61 remove_diacritics 2'
+	);
+
+	INSERT INTO transcripts_fts(rowid, content_text)
+		SELECT id, COALESCE(content_text, '') FROM transcripts;
+
+	CREATE TRIGGER IF NOT EXISTS transcripts_fts_ai AFTER INSERT ON transcripts BEGIN
+		INSERT INTO transcripts_fts(rowid, content_text)
+			VALUES (new.id, COALESCE(new.content_text, ''));
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS transcripts_fts_ad AFTER DELETE ON transcripts BEGIN
+		INSERT INTO transcripts_fts(transcripts_fts, rowid, content_text)
+			VALUES ('delete', old.id, COALESCE(old.content_text, ''));
+	END;
+
+	CREATE TRIGGER IF NOT EXISTS transcripts_fts_au AFTER UPDATE ON transcripts BEGIN
+		INSERT INTO transcripts_fts(transcripts_fts, rowid, content_text)
+			VALUES ('delete', old.id, COALESCE(old.content_text, ''));
+		INSERT INTO transcripts_fts(rowid, content_text)
+			VALUES (new.id, COALESCE(new.content_text, ''));
+	END;`,
+
+	// Migration 004: Durable fetch job queue
+	`CREATE TABLE IF NOT EXISTS fetch_jobs (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		video_id      TEXT NOT NULL UNIQUE,
+		channel_id    TEXT NOT NULL,
+		title         TEXT NOT NULL DEFAULT '',
+		state         TEXT NOT NULL DEFAULT 'pending',  -- pending|in_progress|failed|dead|no_transcript
+		retry_count   INTEGER NOT NULL DEFAULT 0,
+		last_error    TEXT,
+		next_retry_at TEXT,
+		created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_fetch_jobs_state ON fetch_jobs(state, next_retry_at);`,
 }
 
 func (s *Store) migrate() error {
