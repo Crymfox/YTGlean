@@ -2,17 +2,13 @@ package cmd
 
 import (
 	"fmt"
-	"log/slog"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/CrymfoxLabs/YTGlean/internal/db"
-	"github.com/CrymfoxLabs/YTGlean/internal/feed"
+	"github.com/CrymfoxLabs/YTGlean/internal/fetcher"
 	"github.com/CrymfoxLabs/YTGlean/internal/ratelimit"
 	"github.com/CrymfoxLabs/YTGlean/internal/transcript"
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 )
 
 var fetchCmd = &cobra.Command{
@@ -67,210 +63,52 @@ var fetchCmd = &cobra.Command{
 			channels = filtered
 		}
 
-		// Initialize rate limiter (used for both feed and transcript fetching)
-		limiter := ratelimit.New(cfg.RateLimit)
-
-		// Initialize feed cache (1 hour TTL)
-		feedCache := feed.NewCache(1 * time.Hour)
-
-		// Phase 1: Parallel feed discovery with caching
-		type channelFeed struct {
-			channelID string
-			entries   []feed.Entry
-		}
-
-		var (
-			feedResults []channelFeed
-			feedMu      sync.Mutex
-		)
-
-		g, gCtx := errgroup.WithContext(ctx)
-		sem := make(chan struct{}, 5) // max 5 concurrent feed fetches
-
-		for _, ch := range channels {
-			ch := ch
-			g.Go(func() error {
-				sem <- struct{}{}
-				defer func() { <-sem }()
-
-				slog.Info("checking feed", "channel", ch.Name, "id", ch.ChannelID)
-
-				// Check cache first
-				if cached, ok := feedCache.Get(ch.ChannelID); ok {
-					slog.Debug("using cached feed", "channel", ch.Name, "count", len(cached))
-					feedMu.Lock()
-					feedResults = append(feedResults, channelFeed{channelID: ch.ChannelID, entries: cached})
-					feedMu.Unlock()
-					return nil
-				}
-
-				// Rate limit feed requests
-				if err := limiter.WaitFeed(gCtx); err != nil {
-					return err
-				}
-
-				entries, err := feed.FetchNewVideos(gCtx, ch.ChannelID, sinceTime)
-				if err != nil {
-					slog.Error("failed to fetch feed", "channel", ch.ChannelID, "error", err)
-					return nil // don't abort other fetches
-				}
-
-				// Cache the results
-				feedCache.Set(ch.ChannelID, entries)
-
-				feedMu.Lock()
-				feedResults = append(feedResults, channelFeed{channelID: ch.ChannelID, entries: entries})
-				feedMu.Unlock()
-				return nil
-			})
-		}
-
-		if err := g.Wait(); err != nil {
-			return err
-		}
-
-		// Phase 2: Collect all video IDs for batch DB check
-		type videoJob struct {
-			entry     feed.Entry
-			channelID string
-		}
-
-		var allVideoIDs []string
-		var jobsByChannel = make(map[string][]videoJob)
-
-		for _, result := range feedResults {
-			for _, entry := range result.entries {
-				allVideoIDs = append(allVideoIDs, entry.VideoID)
-				jobsByChannel[result.channelID] = append(jobsByChannel[result.channelID], videoJob{
-					entry:     entry,
-					channelID: result.channelID,
-				})
-			}
-		}
-
-		if len(allVideoIDs) == 0 {
-			fmt.Println("No new videos found.")
-			return nil
-		}
-
-		// Batch check existing videos and transcripts
-		existingVideos, err := store.HasVideos(ctx, allVideoIDs)
-		if err != nil {
-			slog.Error("batch checking videos", "error", err)
-			// Continue anyway — will re-add videos
-		}
-
-		existingTranscripts, err := store.HasAnyTranscripts(ctx, allVideoIDs)
-		if err != nil {
-			slog.Error("batch checking transcripts", "error", err)
-			// Continue anyway — will try to fetch
-		}
-
-		// Filter to only new jobs
-		var jobs []videoJob
-		for channelID, channelJobs := range jobsByChannel {
-			for _, job := range channelJobs {
-				if existingVideos[job.entry.VideoID] && existingTranscripts[job.entry.VideoID] {
-					slog.Debug("skipping, transcript exists", "video", job.entry.VideoID)
-					continue
-				}
-				jobs = append(jobs, job)
-			}
-			// Update last checked timestamp
-			_ = store.UpdateLastChecked(ctx, channelID)
-		}
-
-		if len(jobs) == 0 {
-			fmt.Println("No new videos found.")
-			return nil
-		}
+		f := newFetcher(store)
 
 		if dryRun {
-			fmt.Printf("Would fetch transcripts for %d video(s):\n", len(jobs))
-			for _, j := range jobs {
-				fmt.Printf("  %s  %s  (%s)\n", j.entry.VideoID, j.entry.Title, j.entry.ChannelName)
+			candidates, _, err := f.Discover(ctx, channels, sinceTime, true)
+			if err != nil {
+				return err
+			}
+			if len(candidates) == 0 {
+				fmt.Println("No new videos found.")
+				return nil
+			}
+			fmt.Printf("Would fetch transcripts for %d video(s):\n", len(candidates))
+			for _, c := range candidates {
+				fmt.Printf("  %s  %s  (%s)\n", c.VideoID, c.Title, c.ChannelName)
 			}
 			return nil
 		}
 
-		fmt.Printf("Fetching transcripts for %d video(s)...\n", len(jobs))
-
-		provider := transcript.NewProvider(cfg.Transcript.Provider, cfg.Transcript.CookieFile)
-
-		// Wire up rate-limit backoff for dual provider
-		if dual, ok := provider.(*transcript.DualProvider); ok {
-			dual.SetBackoffCallback(limiter.Backoff)
-		}
-		sem2 := make(chan struct{}, cfg.Transcript.MaxConcurrent)
-		g2, gCtx2 := errgroup.WithContext(ctx)
-
-		var successCount, failCount int
-
-		for _, job := range jobs {
-			job := job
-			g2.Go(func() error {
-				sem2 <- struct{}{}
-				defer func() { <-sem2 }()
-
-				slog.Info("fetching transcript", "video", job.entry.VideoID, "title", job.entry.Title)
-
-				// Rate limit based on provider type
-				switch {
-				case strings.HasPrefix(provider.Name(), "dual(innertube") || provider.Name() == "innertube":
-					if err := limiter.WaitInnerTube(gCtx2); err != nil {
-						return err
-					}
-				case provider.Name() == "ytdlp":
-					if err := limiter.WaitYtDlp(gCtx2); err != nil {
-						return err
-					}
-				default:
-					// Fallback: use fixed delay if configured
-					if cfg.Transcript.FetchDelay > 0 {
-						time.Sleep(cfg.Transcript.FetchDelay)
-					}
-				}
-
-				// Ensure the video record exists
-				pubTime := job.entry.Published
-				if err := store.AddVideo(gCtx2, job.entry.VideoID, job.channelID, job.entry.Title, &pubTime); err != nil {
-					slog.Error("adding video record", "video", job.entry.VideoID, "error", err)
-					failCount++
-					return nil // don't abort other fetches
-				}
-
-				tx, err := provider.FetchTranscript(gCtx2, job.entry.VideoID, cfg.Transcript.Languages)
-				if err != nil {
-					// Use info level for "no transcript" (expected), error level for real failures
-					if transcript.IsPermanentError(err) {
-						slog.Info("no transcript available", "video", job.entry.VideoID)
-					} else {
-						slog.Error("fetching transcript", "video", job.entry.VideoID, "error", err)
-					}
-					failCount++
-					return nil
-				}
-
-				if err := store.AddTranscript(gCtx2, tx.VideoID, tx.Language, tx.RawJSON, tx.FullText, tx.Provider); err != nil {
-					slog.Error("storing transcript", "video", job.entry.VideoID, "error", err)
-					failCount++
-					return nil
-				}
-
-				slog.Info("transcript stored", "video", job.entry.VideoID, "provider", tx.Provider,
-					"segments", len(tx.Segments), "chars", len(tx.FullText))
-				successCount++
-				return nil
-			})
-		}
-
-		if err := g2.Wait(); err != nil {
+		res, err := f.Run(ctx, channels, sinceTime)
+		if err != nil {
 			return err
 		}
 
-		fmt.Printf("Done: %d succeeded, %d failed\n", successCount, failCount)
+		if res.Claimed == 0 {
+			fmt.Println("No new videos found.")
+			return nil
+		}
+		fmt.Printf("Done: %d succeeded, %d no transcript, %d retrying later, %d dead\n",
+			res.Succeeded, res.NoTranscript, res.Failed, res.Dead)
+		if res.Failed > 0 || res.Dead > 0 {
+			fmt.Println("Use 'ytglean queue list' to inspect failed jobs.")
+		}
 		return nil
 	},
+}
+
+// newFetcher builds a Fetcher from the loaded config.
+func newFetcher(store *db.Store) *fetcher.Fetcher {
+	provider := transcript.NewProvider(cfg.Transcript.Provider, cfg.Transcript.CookieFile)
+	limiter := ratelimit.New(cfg.RateLimit)
+	return fetcher.New(store, provider, limiter, fetcher.Config{
+		Languages:      cfg.Transcript.Languages,
+		MaxConcurrent:  cfg.Transcript.MaxConcurrent,
+		MaxRetries:     cfg.Fetch.MaxRetries,
+		BaseRetryDelay: cfg.Fetch.BaseRetryDelay,
+	})
 }
 
 func init() {

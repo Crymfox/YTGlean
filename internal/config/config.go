@@ -10,11 +10,13 @@ import (
 )
 
 type Config struct {
-	Database   DatabaseConfig    `yaml:"database"   mapstructure:"database"`
-	Transcript TranscriptConfig  `yaml:"transcript" mapstructure:"transcript"`
-	RateLimit  ratelimit.Config  `yaml:"ratelimit"  mapstructure:"ratelimit"`
-	Summarizer SummarizerConfig  `yaml:"summarizer" mapstructure:"summarizer"`
-	MCP        MCPConfig         `yaml:"mcp"        mapstructure:"mcp"`
+	Database   DatabaseConfig   `yaml:"database"   mapstructure:"database"`
+	Transcript TranscriptConfig `yaml:"transcript" mapstructure:"transcript"`
+	Fetch      FetchConfig      `yaml:"fetch"      mapstructure:"fetch"`
+	Watch      WatchConfig      `yaml:"watch"      mapstructure:"watch"`
+	RateLimit  ratelimit.Config `yaml:"ratelimit"  mapstructure:"ratelimit"`
+	Summarizer SummarizerConfig `yaml:"summarizer" mapstructure:"summarizer"`
+	MCP        MCPConfig        `yaml:"mcp"        mapstructure:"mcp"`
 }
 
 type DatabaseConfig struct {
@@ -29,6 +31,20 @@ type TranscriptConfig struct {
 	CookieFile    string        `yaml:"cookie_file"    mapstructure:"cookie_file"`
 	MaxConcurrent int           `yaml:"max_concurrent" mapstructure:"max_concurrent"`
 	FetchDelay    time.Duration `yaml:"fetch_delay"    mapstructure:"fetch_delay"`
+}
+
+// FetchConfig controls the durable fetch job queue.
+type FetchConfig struct {
+	MaxRetries     int           `yaml:"max_retries"      mapstructure:"max_retries"`
+	BaseRetryDelay time.Duration `yaml:"base_retry_delay" mapstructure:"base_retry_delay"`
+}
+
+// WatchConfig controls the continuous watch loop.
+type WatchConfig struct {
+	FetchInterval      time.Duration `yaml:"fetch_interval"      mapstructure:"fetch_interval"`
+	AutoSummarize      bool          `yaml:"auto_summarize"      mapstructure:"auto_summarize"`
+	SummarizeThreshold int           `yaml:"summarize_threshold" mapstructure:"summarize_threshold"`
+	SummarizeChannel   string        `yaml:"summarize_channel"   mapstructure:"summarize_channel"`
 }
 
 type SummarizerConfig struct {
@@ -73,6 +89,15 @@ func Load() (*Config, error) {
 			FetchDelay:    2 * time.Second,
 		},
 		RateLimit: ratelimit.DefaultConfig(),
+		Fetch: FetchConfig{
+			MaxRetries:     5,
+			BaseRetryDelay: 30 * time.Second,
+		},
+		Watch: WatchConfig{
+			FetchInterval:      30 * time.Minute,
+			AutoSummarize:      false,
+			SummarizeThreshold: 5,
+		},
 		Summarizer: SummarizerConfig{
 			Endpoint:  "https://api.openai.com/v1",
 			Model:     "gpt-4o-mini",
@@ -113,6 +138,16 @@ transcript:
   # cookie_file: ""
   max_concurrent: 3
   fetch_delay: 2s       # delay between fetch requests (used if ratelimit disabled)
+
+fetch:
+  max_retries: 5        # attempts before a job is dead-lettered
+  base_retry_delay: 30s # doubles each retry (30s, 1m, 2m, 4m, 8m)
+
+watch:
+  fetch_interval: 30m
+  auto_summarize: false
+  summarize_threshold: 5   # min new transcripts before auto-summarize
+  summarize_channel: ""    # optional channel filter for the digest
 
 ratelimit:
   feed:

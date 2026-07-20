@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +81,20 @@ func (l *Limiter) WaitInnerTube(ctx context.Context) error {
 func (l *Limiter) WaitYtDlp(ctx context.Context) error {
 	l.maybeRecover()
 	return l.ytdlpLimiter.Wait(ctx)
+}
+
+// WaitProvider blocks until a request token is available for the given
+// transcript provider name (as returned by Provider.Name()).
+// Unknown provider names are not rate limited.
+func (l *Limiter) WaitProvider(ctx context.Context, providerName string) error {
+	switch {
+	case strings.HasPrefix(providerName, "dual(innertube") || providerName == "innertube":
+		return l.WaitInnerTube(ctx)
+	case providerName == "ytdlp":
+		return l.WaitYtDlp(ctx)
+	default:
+		return nil
+	}
 }
 
 // Backoff reduces the rate limit (call on 429/402 errors).
