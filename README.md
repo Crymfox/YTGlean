@@ -8,10 +8,12 @@ Glean transcripts from YouTube channels, store them in SQLite, summarize via LLM
 - Dual transcript providers: InnerTube API (fast, pure Go) with yt-dlp fallback
 - Automatic channel ID and name resolution from handles/URLs
 - Language fallback: tries all configured transcript languages before failing
+- Durable fetch queue: failed fetches retry with exponential backoff and dead-letter after repeated failures
+- Watch mode: continuous daemon that fetches on an interval and optionally auto-summarizes
 - Retry with exponential backoff on transient failures
 - Rate limiting protection with configurable fetch delay
 - Summarize transcripts via any OpenAI-compatible API (OpenAI, Ollama, LM Studio, etc.)
-- Full-text search across stored transcripts
+- Full-text search across stored transcripts (SQLite FTS5, relevance-ranked)
 - MCP server for AI agent integration (Claude Desktop, Cursor, etc.)
 - Configurable data retention and pruning
 
@@ -88,6 +90,16 @@ transcript:
   max_concurrent: 3
   fetch_delay: 2s         # delay between requests to avoid rate limiting
 
+fetch:
+  max_retries: 5          # attempts before a job is dead-lettered
+  base_retry_delay: 30s   # doubles each retry (30s, 1m, 2m, 4m, 8m)
+
+watch:
+  fetch_interval: 30m     # how often watch mode checks for new videos
+  auto_summarize: false
+  summarize_threshold: 5  # min new transcripts before auto-summarize
+  summarize_channel: ""   # optional channel filter for auto-digests
+
 summarizer:
   endpoint: https://api.openai.com/v1
   api_key: your-api-key-here
@@ -126,6 +138,30 @@ ytglean fetch --all                        # All videos in feed
 ytglean fetch --dry-run                    # Preview without fetching
 ```
 
+Fetches are backed by a durable job queue: transient failures are retried with exponential backoff on subsequent runs, and jobs that keep failing are dead-lettered. Videos with no transcript available are remembered so they aren't re-attempted every run.
+
+### Fetch Queue
+
+```bash
+ytglean queue list                         # Show queued/failed/dead jobs
+ytglean queue list --state failed          # Filter by state
+ytglean queue retry --id 42                # Reset a job with a fresh retry budget
+ytglean queue retry-all                    # Make all failed jobs retry now
+ytglean queue clear-dead                   # Remove dead and no-transcript jobs
+```
+
+### Watch Mode
+
+```bash
+ytglean watch                              # Fetch every 30m (config: watch.fetch_interval)
+ytglean watch --fetch-interval 15m         # Custom interval
+ytglean watch --auto-summarize             # Digest after enough new transcripts
+ytglean watch --auto-summarize --summarize-threshold 10
+ytglean watch --channel <id>               # Watch a single channel
+```
+
+Runs until interrupted (SIGINT/SIGTERM); shuts down gracefully, releasing any in-flight queue claims.
+
 ### Summarize
 
 ```bash
@@ -163,6 +199,7 @@ ytglean prune --vacuum                     # Compact DB after pruning
 ytglean serve                              # stdio (default, for Claude Desktop / Cursor)
 ytglean serve --transport http             # HTTP transport
 ytglean serve --port 8080                  # Custom port
+ytglean serve --watch                      # Also run the watch loop in-process
 ```
 
 MCP tools available:
@@ -170,14 +207,14 @@ MCP tools available:
 | Tool | Description |
 |---|---|
 | `list_channels` | List all tracked channels |
-| `search_transcripts` | Full-text search with video titles, channel names, word-bounded excerpts |
+| `search_transcripts` | Full-text search (FTS5, bm25-ranked, `term*` prefix matching) with video titles, channel names, word-bounded excerpts |
 | `get_transcript` | Get full transcript (supports language, max_chars, timestamped format) |
 | `get_video_info` | Video metadata without full transcript (title, channel, word count) |
 | `get_recent_videos` | List recent videos from tracked channels |
 | `list_videos` | Browse all stored videos with transcript status |
 | `list_digests` | List stored summaries with metadata |
 | `get_digest` | Read a specific digest's full text |
-| `fetch_new` | Fetch new transcripts from YouTube |
+| `fetch_new` | Fetch new transcripts from YouTube (durable queue, rate-limited, retries) |
 | `summarize` | Summarize via LLM (requires API key) or guide agent to self-summarize |
 
 ### Global Flags
