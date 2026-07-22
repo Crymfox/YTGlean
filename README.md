@@ -24,6 +24,19 @@ Glean transcripts from YouTube channels, store them in SQLite, summarize via LLM
 
 ## Install
 
+### macOS (Homebrew)
+
+```bash
+brew install --cask Crymfox/tap/ytglean
+```
+
+### Windows (Scoop)
+
+```powershell
+scoop bucket add crymfox https://github.com/Crymfox/scoop-bucket
+scoop install ytglean
+```
+
 ### Arch Linux (AUR)
 
 ```bash

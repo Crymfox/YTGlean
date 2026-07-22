@@ -27,13 +27,45 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - LICENSE
       - README.md
+
+homebrew_casks:
+  - repository:
+      owner: Crymfox
+      name: homebrew-tap
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: Casks
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    homepage: "https://github.com/Crymfox/YTGlean"
+    description: "Glean transcripts from YouTube channels, summarize via LLM, and serve them over MCP"
+    # Binaries are cross-compiled and unsigned; strip the quarantine bit so
+    # macOS Gatekeeper doesn't flag the CLI as "damaged".
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/ytglean"]
+          end
+
+scoops:
+  - repository:
+      owner: Crymfox
+      name: scoop-bucket
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    homepage: "https://github.com/Crymfox/YTGlean"
+    description: "Glean transcripts from YouTube channels, summarize via LLM, and serve them over MCP"
+    license: "MIT"
 
 checksum:
   name_template: "checksums.txt"

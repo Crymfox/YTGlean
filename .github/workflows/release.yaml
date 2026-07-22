@@ -27,6 +27,8 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with write access to Crymfox/homebrew-tap and Crymfox/scoop-bucket
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
 
   publish-aur:
     needs: goreleaser
