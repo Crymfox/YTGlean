@@ -61,6 +61,83 @@ cd YTGlean
 go build -o ytglean .
 ```
 
+## Use with AI Agents
+
+YTGlean runs as an MCP server, giving AI coding agents full access to YouTube transcript data. Add it to your agent's config:
+
+### Claude Desktop
+
+Edit `~/.config/claude/claude_desktop_config.json` (Linux) or `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+
+```json
+{
+  "mcpServers": {
+    "ytglean": {
+      "command": "ytglean",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Claude Code
+
+```bash
+claude mcp add ytglean -- ytglean serve
+```
+
+### Cursor
+
+Create `.cursor/mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "ytglean": {
+      "command": "ytglean",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Cline
+
+Edit MCP settings (VS Code: Cline panel → MCP Servers → Configure MCP Servers):
+
+```json
+{
+  "mcpServers": {
+    "ytglean": {
+      "command": "ytglean",
+      "args": ["serve"],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+### OpenCode
+
+Add to `opencode.json` in your project root:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ytglean": {
+      "type": "local",
+      "command": ["ytglean", "serve"],
+      "enabled": true
+    }
+  }
+}
+```
+
+> **Tip:** Add `"args": ["serve", "--watch"]` to also run the background fetch loop inside the server process.
+```
+
 ## Quick Start
 
 On first run, YTGlean auto-generates a config file at `~/.config/ytglean/config.yaml`.
@@ -220,15 +297,20 @@ MCP tools available:
 | Tool | Description |
 |---|---|
 | `list_channels` | List all tracked channels |
+| `add_channel` | Add a YouTube channel by handle, URL, or ID (name auto-resolved) |
+| `remove_channel` | Remove a tracked channel by ID or name |
 | `search_transcripts` | Full-text search (FTS5, bm25-ranked, `term*` prefix matching) with video titles, channel names, word-bounded excerpts |
 | `get_transcript` | Get full transcript (supports language, max_chars, timestamped format) |
 | `get_video_info` | Video metadata without full transcript (title, channel, word count) |
 | `get_recent_videos` | List recent videos from tracked channels |
 | `list_videos` | Browse all stored videos with transcript status |
+| `fetch_new` | Fetch new transcripts from YouTube (durable queue, rate-limited, retries, dry-run preview) |
 | `list_digests` | List stored summaries with metadata |
 | `get_digest` | Read a specific digest's full text |
-| `fetch_new` | Fetch new transcripts from YouTube (durable queue, rate-limited, retries) |
 | `summarize` | Summarize via LLM (requires API key) or guide agent to self-summarize |
+| `queue_list` | Inspect fetch queue jobs (filter by state, see errors and retry info) |
+| `queue_retry` | Reset a specific failed job with a fresh retry budget |
+| `queue_retry_all` | Make all failed jobs immediately eligible for retry |
 
 ### Global Flags
 
