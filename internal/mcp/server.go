@@ -7,8 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/CrymfoxLabs/YTGlean/internal/channel"
 	"github.com/CrymfoxLabs/YTGlean/internal/config"
 	"github.com/CrymfoxLabs/YTGlean/internal/db"
+	"github.com/CrymfoxLabs/YTGlean/internal/digest"
 	"github.com/CrymfoxLabs/YTGlean/internal/fetcher"
 	"github.com/CrymfoxLabs/YTGlean/internal/summarizer"
 	mcplib "github.com/mark3labs/mcp-go/mcp"
@@ -97,6 +99,8 @@ func NewServer(store *db.Store, f *fetcher.Fetcher, languages []string, version 
 			mcplib.WithDescription("Fetch transcripts for new videos from tracked channels"),
 			mcplib.WithString("channel", mcplib.Description("Filter to a specific channel ID or name")),
 			mcplib.WithString("since", mcplib.Description("Time window, e.g. '24h' (default: '24h')")),
+			mcplib.WithBoolean("all", mcplib.Description("Fetch all videos in feed, ignoring time filter")),
+			mcplib.WithBoolean("dry_run", mcplib.Description("Preview what would be fetched without fetching")),
 		),
 		fetchNewHandler(store, f),
 	)
@@ -141,8 +145,50 @@ func NewServer(store *db.Store, f *fetcher.Fetcher, languages []string, version 
 			mcplib.WithString("query", mcplib.Description("Search transcripts matching query, then summarize")),
 			mcplib.WithString("since", mcplib.Description("Time window, e.g. '24h', '168h' (default: '24h')")),
 			mcplib.WithString("prompt", mcplib.Description("Custom system prompt for the summarizer")),
+			mcplib.WithBoolean("re_summarize", mcplib.Description("Force re-summarize even if the same video set was already summarized")),
 		),
 		summarizeHandler(store, summarizerCfg),
+	)
+
+	s.AddTool(
+		mcplib.NewTool("add_channel",
+			mcplib.WithDescription("Add a YouTube channel to track. Accepts a handle (@name), URL, or channel ID. The channel name is auto-resolved from YouTube."),
+			mcplib.WithString("input", mcplib.Required(), mcplib.Description("YouTube handle (@Fireship), URL, or channel ID")),
+			mcplib.WithString("name", mcplib.Description("Optional display name override")),
+		),
+		addChannelHandler(store),
+	)
+
+	s.AddTool(
+		mcplib.NewTool("remove_channel",
+			mcplib.WithDescription("Remove a tracked YouTube channel"),
+			mcplib.WithString("channel", mcplib.Required(), mcplib.Description("Channel ID or name to remove")),
+		),
+		removeChannelHandler(store),
+	)
+
+	s.AddTool(
+		mcplib.NewTool("queue_list",
+			mcplib.WithDescription("List fetch queue jobs with state and error details"),
+			mcplib.WithString("state", mcplib.Description("Filter by state: pending, in_progress, failed, dead, no_transcript")),
+			mcplib.WithNumber("limit", mcplib.Description("Maximum jobs to return (default 50)")),
+		),
+		queueListHandler(store),
+	)
+
+	s.AddTool(
+		mcplib.NewTool("queue_retry",
+			mcplib.WithDescription("Reset a specific fetch job to pending with a fresh retry budget"),
+			mcplib.WithNumber("id", mcplib.Required(), mcplib.Description("Job ID to retry (from queue_list)")),
+		),
+		queueRetryHandler(store),
+	)
+
+	s.AddTool(
+		mcplib.NewTool("queue_retry_all",
+			mcplib.WithDescription("Make all failed fetch jobs immediately eligible for retry"),
+		),
+		queueRetryAllHandler(store),
 	)
 
 	return s
@@ -290,6 +336,8 @@ func fetchNewHandler(store *db.Store, f *fetcher.Fetcher) server.ToolHandlerFunc
 	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
 		channelFilter := req.GetString("channel", "")
 		sinceStr := req.GetString("since", "")
+		all := req.GetBool("all", false)
+		dryRun := req.GetBool("dry_run", false)
 
 		since := 24 * time.Hour
 		if sinceStr != "" {
@@ -299,6 +347,9 @@ func fetchNewHandler(store *db.Store, f *fetcher.Fetcher) server.ToolHandlerFunc
 			}
 		}
 		sinceTime := time.Now().Add(-since)
+		if all {
+			sinceTime = time.Time{}
+		}
 
 		channelID, err := resolveChannelID(ctx, store, channelFilter)
 		if err != nil {
@@ -317,6 +368,27 @@ func fetchNewHandler(store *db.Store, f *fetcher.Fetcher) server.ToolHandlerFunc
 				}
 			}
 			channels = filtered
+		}
+
+		if dryRun {
+			candidates, _, err := f.Discover(ctx, channels, sinceTime, true)
+			if err != nil {
+				return errorResult(err), nil
+			}
+			if len(candidates) == 0 {
+				return mcplib.NewToolResultText("No new videos found."), nil
+			}
+			type preview struct {
+				VideoID     string `json:"video_id"`
+				Title       string `json:"title"`
+				ChannelName string `json:"channel_name"`
+			}
+			var out []preview
+			for _, c := range candidates {
+				out = append(out, preview{VideoID: c.VideoID, Title: c.Title, ChannelName: c.ChannelName})
+			}
+			data, _ := json.MarshalIndent(out, "", "  ")
+			return mcplib.NewToolResultText(fmt.Sprintf("Would fetch transcripts for %d video(s):\n%s", len(candidates), data)), nil
 		}
 
 		res, err := f.Run(ctx, channels, sinceTime)
@@ -478,77 +550,179 @@ func summarizeHandler(store *db.Store, cfg *config.SummarizerConfig) server.Tool
 		query := req.GetString("query", "")
 		sinceStr := req.GetString("since", "24h")
 		customPrompt := req.GetString("prompt", "")
+		reSummarize := req.GetBool("re_summarize", false)
 
 		channelID, err := resolveChannelID(ctx, store, channel)
 		if err != nil {
 			return errorResult(err), nil
 		}
 
-		var transcripts []db.Transcript
-
-		if videoID != "" {
-			t, err := store.GetTranscriptAnyLanguage(ctx, videoID)
-			if err != nil {
-				return errorResult(err), nil
-			}
-			if t == nil {
-				return mcplib.NewToolResultText(fmt.Sprintf("No transcript found for video %s", videoID)), nil
-			}
-			transcripts = append(transcripts, *t)
-		} else if query != "" {
+		// Query-based summarization: search, then summarize inline (digest.Generate doesn't support query).
+		if query != "" {
 			results, err := store.SearchTranscriptsWithMetadata(ctx, query, channelID, 20)
 			if err != nil {
 				return errorResult(err), nil
 			}
-			for _, r := range results {
-				transcripts = append(transcripts, r.Transcript)
+			if len(results) == 0 {
+				return mcplib.NewToolResultText("No transcripts found matching the query."), nil
 			}
-		} else {
-			since := 24 * time.Hour
-			if sinceStr != "" {
-				d, err := time.ParseDuration(sinceStr)
-				if err == nil {
-					since = d
+			var combined strings.Builder
+			for i, r := range results {
+				video, _ := store.GetVideo(ctx, r.VideoID)
+				title := r.VideoID
+				if video != nil && video.Title != "" {
+					title = video.Title
+				}
+				if i > 0 {
+					combined.WriteString("\n\n---\n\n")
+				}
+				fmt.Fprintf(&combined, "## Video: %s (ID: %s)\n\n", title, r.VideoID)
+				if r.ContentText != nil {
+					combined.WriteString(*r.ContentText)
 				}
 			}
-			windowEnd := time.Now()
-			windowStart := windowEnd.Add(-since)
-			transcripts, err = store.GetTranscriptsInWindow(ctx, windowStart, windowEnd, channelID)
+			s := summarizer.New(cfg.Endpoint, cfg.APIKey, cfg.Model, cfg.MaxTokens)
+			result, err := s.Summarize(ctx, combined.String(), customPrompt)
 			if err != nil {
-				return errorResult(err), nil
+				return errorResult(fmt.Errorf("summarization failed: %w", err)), nil
+			}
+			output := fmt.Sprintf("=== Summary (%d videos) ===\n\n%s\n\n--- Model: %s | Tokens: %d prompt, %d completion ---",
+				len(results), result.Summary, result.Model,
+				result.Usage.PromptTokens, result.Usage.CompletionTokens)
+			return mcplib.NewToolResultText(output), nil
+		}
+
+		// Time-window or single-video summarization via digest.Generate (supports dedup).
+		since := 24 * time.Hour
+		if sinceStr != "" {
+			d, err := time.ParseDuration(sinceStr)
+			if err == nil {
+				since = d
 			}
 		}
 
-		if len(transcripts) == 0 {
-			return mcplib.NewToolResultText("No transcripts found matching the criteria."), nil
-		}
-
-		var combined strings.Builder
-		for i, t := range transcripts {
-			video, _ := store.GetVideo(ctx, t.VideoID)
-			title := t.VideoID
-			if video != nil && video.Title != "" {
-				title = video.Title
-			}
-			if i > 0 {
-				combined.WriteString("\n\n---\n\n")
-			}
-			fmt.Fprintf(&combined, "## Video: %s (ID: %s)\n\n", title, t.VideoID)
-			if t.ContentText != nil {
-				combined.WriteString(*t.ContentText)
-			}
-		}
-
-		s := summarizer.New(cfg.Endpoint, cfg.APIKey, cfg.Model, cfg.MaxTokens)
-		result, err := s.Summarize(ctx, combined.String(), customPrompt)
+		res, err := digest.Generate(ctx, store, *cfg, digest.Options{
+			Since:   since,
+			Channel: channelID,
+			VideoID: videoID,
+			Prompt:  customPrompt,
+			Force:   reSummarize,
+		})
 		if err != nil {
 			return errorResult(fmt.Errorf("summarization failed: %w", err)), nil
 		}
 
+		if res.Skipped {
+			if res.NoTranscripts {
+				return mcplib.NewToolResultText("No transcripts found matching the criteria."), nil
+			}
+			return mcplib.NewToolResultText(res.SkipReason + ". Use re_summarize=true to force."), nil
+		}
+
 		output := fmt.Sprintf("=== Summary (%d videos) ===\n\n%s\n\n--- Model: %s | Tokens: %d prompt, %d completion ---",
-			len(transcripts), result.Summary, result.Model,
-			result.Usage.PromptTokens, result.Usage.CompletionTokens)
+			res.Digest.VideoCount, res.Summary.Summary, res.Summary.Model,
+			res.Summary.Usage.PromptTokens, res.Summary.Usage.CompletionTokens)
 		return mcplib.NewToolResultText(output), nil
+	}
+}
+
+func addChannelHandler(store *db.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		input := req.GetString("input", "")
+		name := req.GetString("name", "")
+
+		channelID, channelURL, resolvedName, err := channel.Resolve(ctx, input)
+		if err != nil {
+			return errorResult(fmt.Errorf("resolving channel %q: %w", input, err)), nil
+		}
+
+		if name == "" {
+			name = resolvedName
+		}
+		if name == "" {
+			name = channelID
+		}
+
+		if err := store.AddChannel(ctx, channelID, name, channelURL); err != nil {
+			return errorResult(err), nil
+		}
+
+		return mcplib.NewToolResultText(fmt.Sprintf("Added channel: %s (%s)", name, channelID)), nil
+	}
+}
+
+func removeChannelHandler(store *db.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		input := req.GetString("channel", "")
+
+		channelID := input
+		if !channel.IsID(input) {
+			ch, err := store.GetChannelByName(ctx, input)
+			if err != nil {
+				return errorResult(err), nil
+			}
+			if ch == nil {
+				return errorResult(fmt.Errorf("channel %q not found", input)), nil
+			}
+			channelID = ch.ChannelID
+		}
+
+		if err := store.RemoveChannel(ctx, channelID); err != nil {
+			return errorResult(err), nil
+		}
+
+		return mcplib.NewToolResultText(fmt.Sprintf("Removed channel: %s", channelID)), nil
+	}
+}
+
+func queueListHandler(store *db.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		state := req.GetString("state", "")
+		limit := req.GetInt("limit", 50)
+
+		jobs, err := store.ListFetchJobs(ctx, state, limit)
+		if err != nil {
+			return errorResult(err), nil
+		}
+
+		counts, err := store.CountFetchJobsByState(ctx)
+		if err != nil {
+			return errorResult(err), nil
+		}
+
+		type queueResult struct {
+			Jobs   []db.FetchJob  `json:"jobs"`
+			Counts map[string]int `json:"counts"`
+		}
+
+		data, _ := json.MarshalIndent(queueResult{Jobs: jobs, Counts: counts}, "", "  ")
+		return mcplib.NewToolResultText(string(data)), nil
+	}
+}
+
+func queueRetryHandler(store *db.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		id := int64(req.GetInt("id", 0))
+		if id == 0 {
+			return errorResult(fmt.Errorf("job ID is required")), nil
+		}
+
+		if err := store.RetryFetchJob(ctx, id); err != nil {
+			return errorResult(err), nil
+		}
+
+		return mcplib.NewToolResultText(fmt.Sprintf("Job %d reset to pending with fresh retry budget.", id)), nil
+	}
+}
+
+func queueRetryAllHandler(store *db.Store) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
+		n, err := store.RetryAllFailedFetchJobs(ctx)
+		if err != nil {
+			return errorResult(err), nil
+		}
+
+		return mcplib.NewToolResultText(fmt.Sprintf("%d failed job(s) reset to pending.", n)), nil
 	}
 }
 
