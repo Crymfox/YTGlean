@@ -1,15 +1,11 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
-	"net/http"
-	"regexp"
 	"strings"
 
+	"github.com/CrymfoxLabs/YTGlean/internal/channel"
 	"github.com/CrymfoxLabs/YTGlean/internal/db"
 	"github.com/spf13/cobra"
 )
@@ -34,7 +30,7 @@ var channelAddCmd = &cobra.Command{
 		input := args[0]
 		name, _ := cmd.Flags().GetString("name")
 
-		channelID, channelURL, resolvedName, err := resolveChannel(ctx, input)
+		channelID, channelURL, resolvedName, err := channel.Resolve(ctx, input)
 		if err != nil {
 			return fmt.Errorf("resolving channel %q: %w", input, err)
 		}
@@ -73,7 +69,7 @@ var channelRemoveCmd = &cobra.Command{
 		channelID := input
 		if !strings.HasPrefix(input, "UC") {
 			// Try resolving as URL/handle
-			resolved, _, _, resolveErr := resolveChannel(ctx, input)
+			resolved, _, _, resolveErr := channel.Resolve(ctx, input)
 			if resolveErr != nil {
 				// Try looking up by name in the database
 				ch, nameErr := store.GetChannelByName(ctx, input)
@@ -141,68 +137,4 @@ func init() {
 
 	channelAddCmd.Flags().String("name", "", "display name for the channel")
 	channelListCmd.Flags().Bool("json", false, "output as JSON")
-}
-
-var channelIDRegex = regexp.MustCompile(`^UC[\w-]{22}$`)
-
-// resolveChannel takes a URL, handle, or channel ID and returns (channelID, channelURL, name, error).
-func resolveChannel(ctx context.Context, input string) (string, string, string, error) {
-	// Bare channel ID
-	if channelIDRegex.MatchString(input) {
-		return input, "https://www.youtube.com/channel/" + input, "", nil
-	}
-
-	// Normalize URL
-	if strings.HasPrefix(input, "@") {
-		input = "https://www.youtube.com/" + input
-	}
-
-	return resolveWithHTTP(ctx, input)
-}
-
-// resolveWithHTTP fetches the YouTube page HTML and extracts the channel ID and name.
-func resolveWithHTTP(ctx context.Context, url string) (string, string, string, error) {
-	slog.Debug("resolving channel via HTTP", "url", url)
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return "", "", "", fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", "", "", fmt.Errorf("fetching page %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1MB limit
-	if err != nil {
-		return "", "", "", fmt.Errorf("reading page body: %w", err)
-	}
-	html := string(body)
-
-	// Extract channel ID
-	var channelID string
-	if m := regexp.MustCompile(`"browseId"\s*:\s*"(UC[\w-]{22})"`).FindStringSubmatch(html); len(m) > 1 {
-		channelID = m[1]
-	} else if m := regexp.MustCompile(`"externalId"\s*:\s*"(UC[\w-]{22})"`).FindStringSubmatch(html); len(m) > 1 {
-		channelID = m[1]
-	} else if m := regexp.MustCompile(`channel_id=(UC[\w-]{22})`).FindStringSubmatch(html); len(m) > 1 {
-		channelID = m[1]
-	}
-	if channelID == "" {
-		return "", "", "", fmt.Errorf("could not extract channel ID from %s", url)
-	}
-
-	// Extract channel name
-	var name string
-	if m := regexp.MustCompile(`"channelMetadataRenderer"\s*:\s*\{[^}]*"title"\s*:\s*"([^"]+)"`).FindStringSubmatch(html); len(m) > 1 {
-		name = m[1]
-	} else if m := regexp.MustCompile(`<title>([^<]+)\s*-\s*YouTube</title>`).FindStringSubmatch(html); len(m) > 1 {
-		name = strings.TrimSpace(m[1])
-	}
-
-	return channelID, "https://www.youtube.com/channel/" + channelID, name, nil
 }
